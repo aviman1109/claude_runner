@@ -1,0 +1,20 @@
+[Unit]
+Description=Claude Runner API — HTTP executor for Claude CLI tasks
+After=network.target
+
+[Service]
+Type=simple
+User=casper
+WorkingDirectory=/home/casper
+ExecStart=/home/casper/.local/bin/claude-runner
+Restart=on-failure
+RestartSec=5
+Environment=PORT=38095
+Environment=HOST=0.0.0.0
+Environment=WORKSPACES_ROOT=/home/casper/workspaces
+Environment=CLAUDE_BIN=/home/casper/.local/bin/claude
+Environment=DEFAULT_MODEL=haiku
+Environment=MAX_CONCURRENT=3
+
+[Install]
+WantedBy=default.target
