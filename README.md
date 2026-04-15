@@ -1,19 +1,27 @@
 # Claude Runner
 
-Lightweight HTTP API that executes Claude CLI (`claude -p`) tasks on behalf of Home Assistant automations.
+Lightweight HTTP API that executes Claude CLI (`claude -p`) tasks on behalf of any caller — Home Assistant automations, MCP servers, scripts, or cron jobs.
 
 ## Architecture
 
 ```
-HA automation (time/sensor trigger)
-  → POST http://192.168.1.x:38095/run
-  → Claude Runner executes claude -p in the target workspace
+Caller (HA / livetrack-mcp / script / cron)
+  → POST http://localhost:38095/run
+  → Claude Runner spawns claude -p in the target workspace
   → Claude calls MCP tools (Garmin, Calendar, Telegram, etc.)
   → Claude sends results via Telegram MCP
   → Runner returns {"status": "accepted"} immediately (fire-and-forget)
 ```
 
-The Runner is a stateless executor. All scheduling, trigger logic, and prompt definitions live in Home Assistant automations.
+The Runner is a **stateless executor**. All scheduling, trigger logic, and prompt definitions live in the caller (HA automations, livetrack-mcp scheduler, etc.).
+
+## Callers
+
+| Caller | Workspace | Use case |
+|---|---|---|
+| Home Assistant automations | `training`, `work` | Daily summaries, alerts |
+| livetrack-mcp (port 38099) | `training` | Race-day LiveTrack analysis every 10 min |
+| Scripts / cron | any | One-off tasks |
 
 ## API
 

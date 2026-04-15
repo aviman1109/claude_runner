@@ -11,7 +11,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel hatchling && \
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -g 1000 casper && useradd -u 1000 -g 1000 -d /home/casper -s /bin/bash casper && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel hatchling && \
     pip install --no-cache-dir .
 
 EXPOSE 38095

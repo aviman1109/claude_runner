@@ -220,8 +220,16 @@ async def _execute(task_id: str, req: RunRequest) -> None:
                         _counter_tasks.add(1, {"workspace": req.workspace, "model": req.model, "status": "completed"})
                 else:
                     _running[task_id]["status"] = "failed"
-                    _running[task_id]["error"] = stderr.decode("utf-8", errors="replace").strip()
-                    logger.error("Task %s failed (rc=%d): %s", task_id, proc.returncode, _running[task_id]["error"])
+                    err_text = stderr.decode("utf-8", errors="replace").strip()
+                    out_text = stdout.decode("utf-8", errors="replace").strip()
+                    # claude CLI writes rate-limit / auth errors to stdout, not stderr.
+                    combined = err_text or out_text or "(no output on either stream)"
+                    _running[task_id]["error"] = combined
+                    _running[task_id]["stdout"] = out_text
+                    logger.error(
+                        "Task %s failed (rc=%d): stderr=%r stdout=%r",
+                        task_id, proc.returncode, err_text, out_text,
+                    )
                     if _counter_tasks:
                         _counter_tasks.add(1, {"workspace": req.workspace, "model": req.model, "status": "failed"})
                     if span:
@@ -275,6 +283,25 @@ async def get_status(task_id: str):
     if task_id not in _running:
         raise HTTPException(status_code=404, detail="Task not found")
     return TaskStatus(task_id=task_id, **_running[task_id])
+
+
+@app.post("/restart-sessions")
+async def restart_sessions():
+    """Directly trigger Claude session restart on the host via SSH (bypasses container PID namespace)."""
+    ssh_key = Path(os.path.expanduser("~/.ssh/id_ed25519_runner"))
+    if not ssh_key.exists():
+        raise HTTPException(status_code=500, detail=f"SSH key not found: {ssh_key}")
+    cmd = (
+        f"ssh -i {ssh_key} -o StrictHostKeyChecking=no -o BatchMode=yes "
+        f"casper@127.0.0.1 'nohup ~/restart-claude-sessions.sh > /tmp/restart-claude.log 2>&1 &'"
+    )
+    await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    logger.info("Claude session restart triggered via SSH")
+    return {"status": "triggered", "log": "/tmp/restart-claude.log"}
 
 
 @app.get("/health")
