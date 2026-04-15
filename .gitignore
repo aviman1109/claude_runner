@@ -9,3 +9,7 @@ build/
 secrets/
 .venv/
 
+data/
+__pycache__/
+*.pyc
+.venv/
