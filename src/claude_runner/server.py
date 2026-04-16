@@ -423,6 +423,106 @@ async def _startup() -> None:
     logger.info("Session DB at %s, idle close after %ds", SESSION_DB, IDLE_CLOSE_SECS)
 
 
+# ── Autopilot webhook receiver — drives LINE monitoring loop ──────────────
+
+LINE_USER_ID_DEFAULT = os.getenv("LINE_USER_ID_DEFAULT", "")
+LINE_MONITOR_INTERVAL_SECS = int(os.getenv("LINE_MONITOR_INTERVAL_SECS", "180"))
+LINE_MONITOR_WORKSPACE = os.getenv("LINE_MONITOR_WORKSPACE", "caddie-line")
+LINE_MONITOR_MODEL = os.getenv("LINE_MONITOR_MODEL", "haiku")
+
+_monitor_tasks: dict[str, asyncio.Task] = {}  # session_id → task
+
+
+async def _line_push(text: str) -> None:
+    """Push a text message to the default LINE user via line-bridge's /push endpoint."""
+    if not LINE_USER_ID_DEFAULT:
+        logger.warning("LINE_USER_ID_DEFAULT unset — can't push")
+        return
+    # claude-runner is network_mode: host, so line-bridge is reachable at 127.0.0.1
+    try:
+        async with httpx.AsyncClient(timeout=10) as cli:
+            r = await cli.post(
+                "http://127.0.0.1:38106/push",
+                json={"user_id": LINE_USER_ID_DEFAULT, "text": text},
+            )
+            if r.status_code >= 300:
+                logger.warning("_line_push got %d: %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        logger.warning("_line_push failed: %s", exc)
+
+
+async def _monitor_loop(session_id: str, profile: str) -> None:
+    """While the sensor-observer session is active, fire a /run to push HR+Power+Cad to LINE every N s."""
+    try:
+        while True:
+            req = RunRequest(
+                workspace=LINE_MONITOR_WORKSPACE,
+                model=LINE_MONITOR_MODEL,
+                prompt=(
+                    f"Casper 正在進行 {profile} session（{session_id}）。\n\n"
+                    f"步驟：\n"
+                    f"1. mcp__sensor-observer__get_timeseries 拉最近 3 分鐘的 hr_bpm / power_w / cadence_rpm\n"
+                    f"2. mcp__line-bridge__push_message(user_id='{LINE_USER_ID_DEFAULT}', text='...') 推到 LINE\n\n"
+                    f"推播規則（嚴格）：\n"
+                    f"- 2-3 行，無 markdown\n"
+                    f"- 第一行：[HH:MM] HR avg/max · Power avg · Cad avg\n"
+                    f"- 第二行：一句教練觀察\n"
+                    f"- 不要問設備 / 配對 / 感測器問題\n"
+                    f"- 全失聯 → 推「監控暫無數據」"
+                ),
+                allowed_tools="mcp__sensor-observer__get_timeseries,mcp__line-bridge__push_message",
+            )
+            task_id = uuid.uuid4().hex[:8]
+            _running[task_id] = {
+                "status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": None, "workspace": req.workspace, "model": req.model,
+                "result": None, "error": None,
+            }
+            await _execute(task_id, req)
+            await asyncio.sleep(LINE_MONITOR_INTERVAL_SECS)
+    except asyncio.CancelledError:
+        logger.info("monitor loop for %s cancelled", session_id)
+        raise
+
+
+@app.post("/autopilot/session_started")
+async def autopilot_session_started(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id", "unknown")
+    profile = body.get("profile", "bike")
+    logger.info("autopilot session_started: %s (%s)", session_id, profile)
+
+    await _line_push(f"🚴 Caddie 監控啟動 · {session_id}\n— {profile} session，每 3 分鐘回報")
+
+    # Kick off periodic push loop
+    if session_id in _monitor_tasks and not _monitor_tasks[session_id].done():
+        logger.warning("monitor already running for %s, skipping", session_id)
+    else:
+        _monitor_tasks[session_id] = asyncio.create_task(_monitor_loop(session_id, profile))
+
+    return {"ok": True, "monitor_started": True}
+
+
+@app.post("/autopilot/session_stopped")
+async def autopilot_session_stopped(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id", "unknown")
+    duration = body.get("duration_sec", 0)
+    reason = body.get("reason", "")
+    logger.info("autopilot session_stopped: %s (duration=%ds reason=%s)", session_id, duration, reason)
+
+    # Cancel running monitor
+    task = _monitor_tasks.pop(session_id, None)
+    if task and not task.done():
+        task.cancel()
+
+    mins = duration // 60
+    secs = duration % 60
+    await _line_push(f"✅ Caddie 監控結束 · {session_id}\n— 本段 {mins}m{secs}s，感測器已寫入 SQLite")
+
+    return {"ok": True, "monitor_cancelled": task is not None}
+
+
 # ── Misc ──────────────────────────────────────────────────────────────────
 
 @app.post("/restart-sessions")
